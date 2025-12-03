@@ -9,32 +9,49 @@ export default function Result() {
 
   if (!processedUrl) {
     return (
-      <div style={{ padding: 24 }}>
-        <Card>
-          <h3>Нет данных для отображения</h3>
-          <Button onClick={() => nav("/upload")}>Перейти к загрузке</Button>
-        </Card>
+      <div className="page" style={{ display: "grid", placeItems: "center" }}>
+        <div style={{ width: "100%", maxWidth: 420 }}>
+          <Card>
+            <h3 style={{ marginTop: 0 }}>Нет данных для отображения</h3>
+            <p style={{ color: "#4b5563" }}>Загрузите изображение, чтобы увидеть результат обработки.</p>
+            <Button onClick={() => nav("/upload")}>Перейти к загрузке</Button>
+          </Card>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: 24 }}>
-      <Card>
-        <h2 style={{ textAlign: "center", color: "#2E8B57" }}>Результат обработки</h2>
-        <div style={{ marginTop: 12 }}>
-          <img src={processedUrl} alt="processed" style={{ width: "100%", borderRadius: 10 }} />
+    <div className="page" style={{ display: "grid", gap: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ color: "#0ea5e9", fontWeight: 700 }}>Шаг 2</div>
+          <h2 style={{ margin: "6px 0 0" }}>Ваше изображение готово</h2>
+          <p style={{ margin: 0, color: "#4b5563" }}>Размытие применено к распознанным номерам и паспортным данным.</p>
         </div>
+        <Button onClick={() => nav("/upload")} style={{ paddingInline: 18 }}>
+          Загрузить другое
+        </Button>
+      </div>
 
-        <div style={{ display: "flex", gap: 12, marginTop: 14 }}>
-          <a href={processedUrl} download="processed.png" style={{ textDecoration: "none", flex: 1 }}>
-            <Button>Скачать</Button>
-          </a>
-          <Button onClick={() => nav("/upload")} style={{ background: "#111", color: "#fff" }}>Новое</Button>
+      <Card>
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ borderRadius: 14, overflow: "hidden", border: "1px solid rgba(15,23,42,0.08)" }}>
+            <img src={processedUrl} alt="processed" style={{ width: "100%", display: "block" }} />
+          </div>
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <a href={processedUrl} download="processed.png" style={{ textDecoration: "none" }}>
+              <Button>Скачать файл</Button>
+            </a>
+            <Button onClick={() => nav("/upload")} style={{ background: "#0f172a", color: "#fff" }}>
+              Новое изображение
+            </Button>
+          </div>
+          <p style={{ color: "#4b5563", margin: 0 }}>Файл не сохраняется на сервере, сохраните его локально.</p>
         </div>
       </Card>
     </div>
   );
 }
-
 
