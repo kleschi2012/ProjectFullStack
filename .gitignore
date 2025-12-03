@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyd
+*.dll
+*.so
+*.zip
+*.mp4
+*.avi
+*.png
+*.jpg
+*.jpeg
