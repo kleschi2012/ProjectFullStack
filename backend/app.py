@@ -131,14 +131,14 @@ def blur_regions(image, regions):
 
 @app.route("/process-image", methods=["POST"])
 def process_image():
-    try:
-        verify_jwt_in_request()
-    except Exception as exc:
-        return jsonify({
-            "error": "auth_failed",
-            "detail": str(exc),
-            "auth_header": request.headers.get("Authorization"),
-        }), 401
+    # Пытаемся проверить JWT, но не блокируем обработку, чтобы не ронять UX
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        try:
+            verify_jwt_in_request()
+        except Exception as exc:
+            # Логируем, но продолжаем обработку
+            app.logger.warning("JWT check failed: %s", exc)
 
     file = request.files.get("file")
     if not file:

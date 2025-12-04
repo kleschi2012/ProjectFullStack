@@ -29,7 +29,7 @@ export default function Upload() {
       return;
     }
     if (!token) {
-      navigate("/login");
+      setError("Нужна авторизация. Войдите ещё раз.");
       return;
     }
 
@@ -37,11 +37,14 @@ export default function Upload() {
     try {
       const resp = await uploadImage(file, token);
       if (resp.status === 401) {
-        localStorage.removeItem("token");
-        navigate("/login");
+        const data = await resp.json().catch(() => ({}));
+        setError(data?.detail || data?.error || "Авторизация недействительна, войдите снова.");
         return;
       }
-      if (!resp.ok) throw new Error("Ошибка сервера: " + resp.status);
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => null);
+        throw new Error(data?.error || "Ошибка сервера: " + resp.status);
+      }
 
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
@@ -117,4 +120,3 @@ export default function Upload() {
     </div>
   );
 }
-
