@@ -1,97 +1,122 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import Card from "../ui/Card";
+import Button from "../ui/Button";
+import { uploadImage } from "../api";
 
 export default function Upload() {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
-  const BACKEND = import.meta.env.VITE_API_URL ?? "http://localhost:5000";
+  const [error, setError] = useState("");
   const navigate = useNavigate();
+  const token = localStorage.getItem("token");
+
+  useEffect(() => {
+    if (!token) navigate("/login");
+  }, [token, navigate]);
 
   const onFile = (f: File | null) => {
+    setError("");
     setFile(f);
     setPreview(f ? URL.createObjectURL(f) : null);
   };
 
   const send = async () => {
+    setError("");
     if (!file) {
-      alert("Пожалуйста, выберите файл.");
+      setError("Выберите изображение");
+      return;
+    }
+    if (!token) {
+      setError("Нужна авторизация. Войдите ещё раз.");
       return;
     }
 
     setLoading(true);
-    const form = new FormData();
-    form.append("file", file);
-
     try {
-      const resp = await fetch(`${BACKEND}/process-image`, {
-        method: "POST",
-        body: form,
-      });
-
-      if (!resp.ok) throw new Error("Ошибка сервера: " + resp.status);
+      const resp = await uploadImage(file, token);
+      if (resp.status === 401) {
+        const data = await resp.json().catch(() => ({}));
+        setError(data?.detail || data?.error || "Авторизация недействительна, войдите снова.");
+        return;
+      }
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => null);
+        throw new Error(data?.error || "Ошибка сервера: " + resp.status);
+      }
 
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
-
-      // ✅ Переход на страницу /result и передача ссылки на обработанное изображение
       navigate("/result", { state: { processedUrl: url } });
     } catch (err: any) {
-      alert("Ошибка: " + (err.message ?? err));
+      setError(err.message || "Ошибка загрузки");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{ maxWidth: 720, margin: "0 auto", padding: "20px" }}>
-      <h2>Загрузка и обработка изображения</h2>
-      <p>
-        Загрузите фото, чтобы система автоматически замазала лица и номера
-        автомобилей.
-      </p>
-
-      <input
-        type="file"
-        accept="image/*"
-        onChange={(e) => onFile(e.target.files ? e.target.files[0] : null)}
-      />
-
-      {preview && (
-        <div style={{ marginTop: 20 }}>
-          <h4>Оригинал:</h4>
-          <img
-            src={preview}
-            alt="preview"
-            style={{
-              maxWidth: "100%",
-              border: "1px solid #ccc",
-              borderRadius: "4px",
-              marginTop: "8px",
-            }}
-          />
+    <div className="page" style={{ display: "grid", gap: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ fontWeight: 700, color: "#0ea5e9", marginBottom: 6 }}>Шаг 1</div>
+          <h2 style={{ margin: 0 }}>Загрузите изображение для обработки</h2>
+          <p style={{ margin: "4px 0 0", color: "#4b5563" }}>
+            Мы автоматически распознаём паспортные данные и номера автомобилей и замазываем их.
+          </p>
         </div>
-      )}
-
-      <div style={{ marginTop: 20 }}>
-        <button
-          onClick={send}
-          disabled={!file || loading}
-          style={{
-            padding: "10px 20px",
-            background: "#007bff",
-            color: "#fff",
-            border: "none",
-            borderRadius: "5px",
-            cursor: loading ? "not-allowed" : "pointer",
-          }}
-        >
-          {loading ? "Обработка..." : "Отправить на сервер"}
-        </button>
+        <Button onClick={() => navigate("/result")} style={{ background: "rgba(14,165,233,0.12)", boxShadow: "none" }}>
+          Посмотреть результат
+        </Button>
       </div>
+
+      <Card>
+        <div style={{ display: "grid", gap: 14 }}>
+          <label
+            htmlFor="file-input"
+            style={{
+              border: "1px dashed rgba(15,23,42,0.16)",
+              borderRadius: 14,
+              padding: "18px",
+              textAlign: "center",
+              background: "rgba(248,250,252,0.9)",
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Перетащите файл или выберите его</div>
+            <div style={{ color: "#4b5563" }}>Поддерживаются изображения с номерами авто и документами</div>
+          </label>
+          <input
+            id="file-input"
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => onFile(e.target.files ? e.target.files[0] : null)}
+          />
+
+          {file && (
+            <div style={{ color: "#0f172a", fontWeight: 600 }}>
+              Вы выбрали: <span style={{ color: "#0ea5e9" }}>{file.name}</span>
+            </div>
+          )}
+
+          {preview && (
+            <div style={{ borderRadius: 14, overflow: "hidden", border: "1px solid rgba(15,23,42,0.08)" }}>
+              <img src={preview} alt="preview" style={{ width: "100%", display: "block" }} />
+            </div>
+          )}
+
+          {error && <div style={{ color: "#b91c1c" }}>{error}</div>}
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Button onClick={send} disabled={loading || !file} style={{ paddingInline: 20 }}>
+              {loading ? "Обрабатываем..." : "Обработать"}
+            </Button>
+            <span style={{ alignSelf: "center", color: "#4b5563" }}>Файл останется только для обработки и не сохраняется.</span>
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }
-
-

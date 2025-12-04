@@ -12,7 +12,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 export default function App() {
   return (
     <BrowserRouter>
-      <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh", background: "#f7faf9" }}>
+      <div className="app-shell">
         <Navbar />
         <main style={{ flex: 1 }}>
           <Routes>
@@ -28,7 +28,6 @@ export default function App() {
     </BrowserRouter>
   );
 }
-
 
 
 
