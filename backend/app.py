@@ -58,6 +58,75 @@ def handle_expired(jwt_header, jwt_payload):
 # Инициализация easyOCR один раз, чтобы ускорить работу API
 ocr_reader = easyocr.Reader(["en", "ru"], gpu=False)
 
+PASSPORT_NUMBER_PATTERNS = [
+    re.compile(r"^\d{2}\s?\d{2}\s?\d{6}$"),  # 80 08 885361
+    re.compile(r"^\d{4}\s?\d{6}$"),          # 8008 885361
+    re.compile(r"^\d{10}$"),                 # 8008885361
+]
+
+# Буквы, разрешенные на российских номерах
+PLATE_LETTERS = "ABEKMHOPCTYXАВЕКМНОРСТУХ"
+PLATE_PATTERN = re.compile(
+    rf"^[{PLATE_LETTERS}]\d{{3}}[{PLATE_LETTERS}]{{2}}\d{{2,3}}$"
+)
+
+
+def _box_iou(box_a, box_b):
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    area_a = (ax2 - ax1) * (ay2 - ay1)
+    area_b = (bx2 - bx1) * (by2 - by1)
+    return inter_area / float(area_a + area_b - inter_area)
+
+
+def _dedupe_boxes(boxes, iou_threshold=0.3):
+    deduped = []
+    for box in boxes:
+        if all(_box_iou(box, saved) < iou_threshold for saved in deduped):
+            deduped.append(box)
+    return deduped
+
+
+def _normalize_plate_text(text):
+    cleaned = re.sub(r"[^A-Za-zА-Яа-я0-9]", "", text or "")
+    return cleaned.upper()
+
+
+def _looks_like_passport_number(text):
+    if not text:
+        return False
+    normalized = re.sub(r"\s+", "", text)
+    return any(pat.match(normalized) for pat in PASSPORT_NUMBER_PATTERNS)
+
+
+def _looks_like_plate(text):
+    normalized = _normalize_plate_text(text)
+    if len(normalized) < 7 or len(normalized) > 9:
+        return False
+    return bool(PLATE_PATTERN.match(normalized))
+
+
+def _merge_boxes(boxes):
+    x1 = min(b[0] for b in boxes)
+    y1 = min(b[1] for b in boxes)
+    x2 = max(b[2] for b in boxes)
+    y2 = max(b[3] for b in boxes)
+    return (x1, y1, x2, y2)
+
+
+def _has_enough_digits(text, min_digits=3):
+    if not text:
+        return False
+    return sum(ch.isdigit() for ch in text) >= min_digits
+
+
 # AUTH
 @app.route("/register", methods=["POST"])
 def register():
@@ -94,39 +163,164 @@ def login():
 
 def detect_passport_fields(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    text = pytesseract.image_to_data(gray, output_type=pytesseract.Output.DICT, lang="rus+eng")
+    data = pytesseract.image_to_data(
+        gray,
+        output_type=pytesseract.Output.DICT,
+        lang="rus+eng",
+        config="--psm 6",
+    )
+
+    tokens = []
+    for i in range(len(data["text"])):
+        raw_word = data["text"][i].strip()
+        conf = float(data["conf"][i])
+        if not raw_word or conf < 0:  # тессеракт помечает -1 как мусор
+            continue
+        cleaned = re.sub(r"[^\w]", "", raw_word)
+        if not cleaned:
+            continue
+        tokens.append(
+            {
+                "text": cleaned,
+                "x1": data["left"][i],
+                "y1": data["top"][i],
+                "x2": data["left"][i] + data["width"][i],
+                "y2": data["top"][i] + data["height"][i],
+                "line": (data["block_num"][i], data["par_num"][i], data["line_num"][i]),
+            }
+        )
+
+    # Группируем токены по строкам, чтобы собрать серию + номер вместе
+    by_line = {}
+    for token in tokens:
+        by_line.setdefault(token["line"], []).append(token)
+    for line_tokens in by_line.values():
+        line_tokens.sort(key=lambda t: t["x1"])
 
     boxes = []
-    passport_regex = r"[A-ZА-Я]{2,}|[0-9]{6}|[0-9]{4}\s[0-9]{6}"
 
-    for i in range(len(text["text"])):
-        word = text["text"][i]
-        if re.match(passport_regex, word):
-            x, y, w, h = text["left"][i], text["top"][i], text["width"][i], text["height"][i]
-            boxes.append((x, y, x + w, y + h))
+    # Проверяем склейку соседних числовых токенов (1-3 подряд)
+    for line_tokens in by_line.values():
+        digit_tokens = [t for t in line_tokens if any(ch.isdigit() for ch in t["text"])]
+        for window in (1, 2, 3):
+            for idx in range(len(digit_tokens) - window + 1):
+                parts = digit_tokens[idx : idx + window]
+                candidate = " ".join(p["text"] for p in parts)
+                if _looks_like_passport_number(candidate):
+                    x1 = min(p["x1"] for p in parts)
+                    y1 = min(p["y1"] for p in parts)
+                    x2 = max(p["x2"] for p in parts)
+                    y2 = max(p["y2"] for p in parts)
+                    boxes.append((x1, y1, x2, y2))
 
-    return boxes
+    # Fallback: easyOCR часто лучше читает вертикальный номер
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    ocr_results = ocr_reader.readtext(rgb)
+    for (bbox, text, prob) in ocr_results:
+        if not _looks_like_passport_number(text):
+            continue
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        boxes.append((int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))))
+
+    return _dedupe_boxes(boxes)
 
 def detect_car_plates(image):
     rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = ocr_reader.readtext(rgb)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    boosted_gray = clahe.apply(gray)
+    boosted_rgb = cv2.cvtColor(boosted_gray, cv2.COLOR_GRAY2RGB)
 
     boxes = []
-    pattern = r"[A-ZА-Я]\d{3}[A-ZА-Я]{2}\d{2,3}"
 
-    for (bbox, text, prob) in results:
-        if re.match(pattern, text.replace(" ", "")):
+    def _collect_easyocr_boxes(img_variant):
+        local_boxes = []
+        results = ocr_reader.readtext(img_variant)
+        for (bbox, text, prob) in results:
+            if not text:
+                continue
+            normalized = _normalize_plate_text(text)
             xs = [p[0] for p in bbox]
             ys = [p[1] for p in bbox]
-            boxes.append((int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))))
+            box = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+            if _has_enough_digits(normalized):
+                local_boxes.append((box, normalized))
+        # Склеиваем соседние числовые куски по оси X
+        partials_sorted = sorted(local_boxes, key=lambda item: item[0][0])
+        merged = []
+        for window in (1, 2, 3, 4):
+            for idx in range(len(partials_sorted) - window + 1):
+                chunk = partials_sorted[idx : idx + window]
+                merged_text = "".join(p[1] for p in chunk)
+                if _has_enough_digits(merged_text):
+                    merged.append(_merge_boxes([p[0] for p in chunk]))
+        return merged
 
-    return boxes
+    # Прогоняем easyOCR по исходному и усиленному по контрасту изображениям
+    for img_variant in (rgb, boosted_rgb):
+        boxes.extend(_collect_easyocr_boxes(img_variant))
+
+    # Подстраховка: тессеракт иногда лучше собирает разорванные символы
+    data = pytesseract.image_to_data(
+        boosted_gray,
+        output_type=pytesseract.Output.DICT,
+        lang="rus+eng",
+        config="--psm 6",
+    )
+    line_map = {}
+    for i in range(len(data["text"])):
+        word = data["text"][i].strip()
+        conf = float(data["conf"][i])
+        if not word or conf < 0:
+            continue
+        cleaned = re.sub(r"[^\w]", "", word)
+        if not cleaned:
+            continue
+        line_key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        line_map.setdefault(line_key, []).append(
+            {
+                "text": cleaned,
+                "x1": data["left"][i],
+                "y1": data["top"][i],
+                "x2": data["left"][i] + data["width"][i],
+                "y2": data["top"][i] + data["height"][i],
+            }
+        )
+
+    for line_tokens in line_map.values():
+        line_tokens.sort(key=lambda t: t["x1"])
+        for window in (1, 2, 3, 4):
+            for idx in range(len(line_tokens) - window + 1):
+                parts = line_tokens[idx : idx + window]
+                candidate = "".join(p["text"] for p in parts)
+                if _has_enough_digits(candidate):
+                    x1 = min(p["x1"] for p in parts)
+                    y1 = min(p["y1"] for p in parts)
+                    x2 = max(p["x2"] for p in parts)
+                    y2 = max(p["y2"] for p in parts)
+                    boxes.append((x1, y1, x2, y2))
+
+    return _dedupe_boxes(boxes)
+
+def _expand_box(box, margin, width, height):
+    x1, y1, x2, y2 = box
+    dx = int((x2 - x1) * margin)
+    dy = int((y2 - y1) * margin)
+    return (
+        max(0, x1 - dx),
+        max(0, y1 - dy),
+        min(width, x2 + dx),
+        min(height, y2 + dy),
+    )
 
 def blur_regions(image, regions):
     img = image.copy()
+    width, height = img.size
     for (x1, y1, x2, y2) in regions:
-        crop = img.crop((x1, y1, x2, y2)).filter(ImageFilter.GaussianBlur(12))
-        img.paste(crop, (x1, y1))
+        ex1, ey1, ex2, ey2 = _expand_box((x1, y1, x2, y2), margin=0.15, width=width, height=height)
+        crop = img.crop((ex1, ey1, ex2, ey2)).filter(ImageFilter.GaussianBlur(18))
+        img.paste(crop, (ex1, ey1))
     return img
 
 @app.route("/process-image", methods=["POST"])
@@ -147,9 +341,8 @@ def process_image():
     pil_img = Image.open(file.stream).convert("RGB")
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-    passport_boxes = detect_passport_fields(cv_img)
     plate_boxes = detect_car_plates(cv_img)
-    all_boxes = passport_boxes + plate_boxes
+    all_boxes = plate_boxes
 
     if not all_boxes:
         img_io = io.BytesIO()
