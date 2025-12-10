@@ -1,8 +1,7 @@
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
-import io
 import cv2
 import numpy as np
 from PIL import Image, ImageFilter
@@ -11,6 +10,7 @@ import easyocr
 import re
 import datetime
 import requests
+from pathlib import Path
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, verify_jwt_in_request
 
 from extensions import db, jwt
@@ -32,7 +32,8 @@ app.config["JWT_HEADER_NAME"] = "Authorization"
 app.config["JWT_HEADER_TYPE"] = "Bearer"
 app.config["PROPAGATE_EXCEPTIONS"] = True
 RESULT_ENDPOINT = os.getenv("RESULT_ENDPOINT", "http://localhost:8080/result")
-PROCESSED_SAVE_DIR = os.getenv("PROCESSED_SAVE_DIR", "/tmp/processed")
+BASE_DIR = Path(__file__).resolve().parent
+PROCESSED_SAVE_DIR = os.getenv("PROCESSED_SAVE_DIR", str(BASE_DIR / "processed"))
 PROCESSED_URL_PATH = os.getenv("PROCESSED_URL_PATH", "/processed")
 
 # Allow overriding tesseract binary location in container/host
@@ -141,6 +142,22 @@ def _file_public_url(filename: str):
 def _file_relative_path(filename: str):
     path = PROCESSED_URL_PATH if PROCESSED_URL_PATH.startswith("/") else f"/{PROCESSED_URL_PATH}"
     return f"{path}/{filename}"
+
+
+def _build_file_info(filename: str):
+    fs_path = os.path.join(PROCESSED_SAVE_DIR, filename)
+    info = {
+        "name": filename,
+        "url": _file_public_url(filename),
+        "path": _file_relative_path(filename),
+    }
+    try:
+        stat = os.stat(fs_path)
+        info["size"] = stat.st_size
+        info["mtime"] = stat.st_mtime
+    except FileNotFoundError:
+        pass
+    return info
 
 
 # AUTH
@@ -343,10 +360,6 @@ def _save_and_forward(image: Image.Image, original_name: str | None):
     os.makedirs(PROCESSED_SAVE_DIR, exist_ok=True)
     image.save(file_path, "PNG")
 
-    buf = io.BytesIO()
-    image.save(buf, "PNG")
-    buf.seek(0)
-
     try:
         with open(file_path, "rb") as fh:
             resp = requests.post(
@@ -358,8 +371,7 @@ def _save_and_forward(image: Image.Image, original_name: str | None):
     except Exception as exc:
         app.logger.error("Failed to forward processed image: %s", exc)
 
-    buf.seek(0)
-    return buf, filename
+    return _build_file_info(filename)
 
 def blur_regions(image, regions):
     img = image.copy()
@@ -391,11 +403,11 @@ def process_image():
     plate_boxes = detect_car_plates(cv_img)
     processed_img = blur_regions(pil_img, plate_boxes) if plate_boxes else pil_img
 
-    img_io, saved_name = _save_and_forward(processed_img, file.filename)
-    response = send_file(img_io, mimetype="image/png")
-    response.headers["X-Processed-Filename"] = saved_name
-    response.headers["X-Processed-Url"] = _file_public_url(saved_name)
-    response.headers["X-Processed-Path"] = _file_relative_path(saved_name)
+    file_info = _save_and_forward(processed_img, file.filename)
+    response = jsonify({"file": file_info, "message": "Изображение обработано и сохранено"})
+    response.headers["X-Processed-Filename"] = file_info["name"]
+    response.headers["X-Processed-Url"] = file_info["url"]
+    response.headers["X-Processed-Path"] = file_info["path"]
     return response
 
 
@@ -409,19 +421,11 @@ def list_processed_files():
                 continue
             path = os.path.join(PROCESSED_SAVE_DIR, name)
             try:
-                stat = os.stat(path)
+                os.stat(path)
             except FileNotFoundError:
                 continue
-            files.append(
-                {
-                    "name": name,
-                    "url": _file_public_url(name),
-                    "path": _file_relative_path(name),
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime,
-                }
-            )
-    files.sort(key=lambda f: f["mtime"], reverse=True)
+            files.append(_build_file_info(name))
+    files.sort(key=lambda f: f.get("mtime") or 0, reverse=True)
     return jsonify({"files": files})
 
 

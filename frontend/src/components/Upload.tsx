@@ -35,22 +35,10 @@ export default function Upload() {
 
     setLoading(true);
     try {
-      const resp = await uploadImage(file, token);
-      if (resp.status === 401) {
-        const data = await resp.json().catch(() => ({}));
-        setError(data?.detail || data?.error || "Авторизация недействительна, войдите снова.");
-        return;
-      }
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => null);
-        throw new Error(data?.error || "Ошибка сервера: " + resp.status);
-      }
-
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      navigate("/result", { state: { processedUrl: url } });
+      const fileInfo = await uploadImage(file, token);
+      navigate("/result", { state: { lastFile: fileInfo } });
     } catch (err: any) {
-      setError(err.message || "Ошибка загрузки");
+      setError(err?.message || "Ошибка загрузки");
     } finally {
       setLoading(false);
     }
@@ -111,7 +99,7 @@ export default function Upload() {
             <Button onClick={send} disabled={loading || !file} style={{ paddingInline: 20 }}>
               {loading ? "Обрабатываем..." : "Обработать"}
             </Button>
-            <span style={{ alignSelf: "center", color: "#4b5563" }}>Файлы сохраняются, чтобы их можно было посмотреть в разделе «Результат».</span>
+            <span style={{ alignSelf: "center", color: "#4b5563" }}>Файлы сохраняются и доступны на странице «Результат».</span>
           </div>
         </div>
       </Card>

@@ -3,17 +3,12 @@ import { useLocation, useNavigate } from "react-router-dom";
 import Card from "../ui/Card";
 import Button from "../ui/Button";
 import { fetchProcessed } from "../api";
-
-type ProcessedFile = {
-  name: string;
-  url: string;
-  path?: string;
-  mtime: number;
-};
+import type { ProcessedFile } from "../api";
 
 export default function Result() {
   const loc = useLocation();
   const nav = useNavigate();
+  const lastFile = (loc.state as any)?.lastFile as ProcessedFile | undefined;
   const processedUrlFromState = (loc.state as any)?.processedUrl as string | undefined;
   const token = localStorage.getItem("token") || undefined;
 
@@ -26,14 +21,12 @@ export default function Result() {
       setError("");
       setLoading(true);
       try {
-        const res = await fetchProcessed(token);
-        if (!res.ok) {
-          throw new Error("Не удалось получить список файлов");
-        }
-        const data = await res.json();
-        const files: ProcessedFile[] = data?.files || [];
+        const files = await fetchProcessed(token);
         const merged = [...files];
-        if (processedUrlFromState && !merged.some((f) => f.url === processedUrlFromState)) {
+
+        if (lastFile && !merged.some((f) => f.url === lastFile.url || f.name === lastFile.name)) {
+          merged.unshift(lastFile);
+        } else if (processedUrlFromState && !merged.some((f) => f.url === processedUrlFromState)) {
           merged.unshift({ name: "Последний результат", url: processedUrlFromState, mtime: Date.now() / 1000 });
         }
         setItems(merged);
@@ -44,7 +37,7 @@ export default function Result() {
       }
     };
     load();
-  }, [token, nav, processedUrlFromState]);
+  }, [token, nav, processedUrlFromState, lastFile]);
 
   const hasItems = items.length > 0;
 
