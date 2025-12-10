@@ -17,7 +17,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PIP_DEFAULT_TIMEOUT=120
+RUN pip install --no-cache-dir --default-timeout=120 --retries=5 -r requirements.txt
 
 RUN mkdir -p /data
 ENV DATABASE_URL=sqlite:////data/app.db
