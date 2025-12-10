@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
@@ -10,6 +10,7 @@ import pytesseract
 import easyocr
 import re
 import datetime
+import requests
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, verify_jwt_in_request
 
 from extensions import db, jwt
@@ -30,6 +31,9 @@ app.config["JWT_TOKEN_LOCATION"] = ["headers"]
 app.config["JWT_HEADER_NAME"] = "Authorization"
 app.config["JWT_HEADER_TYPE"] = "Bearer"
 app.config["PROPAGATE_EXCEPTIONS"] = True
+RESULT_ENDPOINT = os.getenv("RESULT_ENDPOINT", "http://localhost:8080/result")
+PROCESSED_SAVE_DIR = os.getenv("PROCESSED_SAVE_DIR", "/tmp/processed")
+PROCESSED_URL_PATH = os.getenv("PROCESSED_URL_PATH", "/processed")
 
 # Allow overriding tesseract binary location in container/host
 tesseract_cmd = os.getenv("TESSERACT_CMD")
@@ -39,6 +43,7 @@ if tesseract_cmd:
 db.init_app(app)
 jwt.init_app(app)
 migrate = Migrate(app, db)
+os.makedirs(PROCESSED_SAVE_DIR, exist_ok=True)
 
 # JWT error handlers to вернуть понятные ответы (частая причина 422)
 @jwt.unauthorized_loader
@@ -125,6 +130,17 @@ def _has_enough_digits(text, min_digits=3):
     if not text:
         return False
     return sum(ch.isdigit() for ch in text) >= min_digits
+
+
+def _file_public_url(filename: str):
+    base = request.host_url.rstrip("/")
+    path = PROCESSED_URL_PATH if PROCESSED_URL_PATH.startswith("/") else f"/{PROCESSED_URL_PATH}"
+    return f"{base}{path}/{filename}"
+
+
+def _file_relative_path(filename: str):
+    path = PROCESSED_URL_PATH if PROCESSED_URL_PATH.startswith("/") else f"/{PROCESSED_URL_PATH}"
+    return f"{path}/{filename}"
 
 
 # AUTH
@@ -314,6 +330,37 @@ def _expand_box(box, margin, width, height):
         min(height, y2 + dy),
     )
 
+def _save_and_forward(image: Image.Image, original_name: str | None):
+    """
+    Сохраняем обработанный файл локально и отправляем в внешний endpoint.
+    Ошибки отправки не ломают ответ пользователю.
+    """
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    safe_name = re.sub(r"[^\w.-]", "_", original_name or "upload")
+    filename = f"{ts}_{safe_name}.png"
+    file_path = os.path.join(PROCESSED_SAVE_DIR, filename)
+
+    os.makedirs(PROCESSED_SAVE_DIR, exist_ok=True)
+    image.save(file_path, "PNG")
+
+    buf = io.BytesIO()
+    image.save(buf, "PNG")
+    buf.seek(0)
+
+    try:
+        with open(file_path, "rb") as fh:
+            resp = requests.post(
+                RESULT_ENDPOINT,
+                files={"file": (filename, fh, "image/png")},
+                timeout=10,
+            )
+        app.logger.info("Forwarded processed image to %s status=%s", RESULT_ENDPOINT, getattr(resp, "status_code", None))
+    except Exception as exc:
+        app.logger.error("Failed to forward processed image: %s", exc)
+
+    buf.seek(0)
+    return buf, filename
+
 def blur_regions(image, regions):
     img = image.copy()
     width, height = img.size
@@ -342,20 +389,46 @@ def process_image():
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     plate_boxes = detect_car_plates(cv_img)
-    all_boxes = plate_boxes
+    processed_img = blur_regions(pil_img, plate_boxes) if plate_boxes else pil_img
 
-    if not all_boxes:
-        img_io = io.BytesIO()
-        pil_img.save(img_io, "PNG")
-        img_io.seek(0)
-        return send_file(img_io, mimetype="image/png")
+    img_io, saved_name = _save_and_forward(processed_img, file.filename)
+    response = send_file(img_io, mimetype="image/png")
+    response.headers["X-Processed-Filename"] = saved_name
+    response.headers["X-Processed-Url"] = _file_public_url(saved_name)
+    response.headers["X-Processed-Path"] = _file_relative_path(saved_name)
+    return response
 
-    blurred = blur_regions(pil_img, all_boxes)
 
-    img_io = io.BytesIO()
-    blurred.save(img_io, "PNG")
-    img_io.seek(0)
-    return send_file(img_io, mimetype="image/png")
+@app.route("/processed-files", methods=["GET"])
+@jwt_required(optional=True)
+def list_processed_files():
+    files = []
+    if os.path.isdir(PROCESSED_SAVE_DIR):
+        for name in os.listdir(PROCESSED_SAVE_DIR):
+            if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
+                continue
+            path = os.path.join(PROCESSED_SAVE_DIR, name)
+            try:
+                stat = os.stat(path)
+            except FileNotFoundError:
+                continue
+            files.append(
+                {
+                    "name": name,
+                    "url": _file_public_url(name),
+                    "path": _file_relative_path(name),
+                    "size": stat.st_size,
+                    "mtime": stat.st_mtime,
+                }
+            )
+    files.sort(key=lambda f: f["mtime"], reverse=True)
+    return jsonify({"files": files})
+
+
+@app.route(f"{PROCESSED_URL_PATH.rstrip('/')}/<path:filename>")
+@jwt_required(optional=True)
+def serve_processed(filename):
+    return send_from_directory(PROCESSED_SAVE_DIR, filename)
 
 @app.route("/health")
 def health():

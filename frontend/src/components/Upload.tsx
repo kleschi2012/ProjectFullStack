@@ -62,9 +62,7 @@ export default function Upload() {
         <div>
           <div style={{ fontWeight: 700, color: "#0ea5e9", marginBottom: 6 }}>Шаг 1</div>
           <h2 style={{ margin: 0 }}>Загрузите изображение для обработки</h2>
-          <p style={{ margin: "4px 0 0", color: "#4b5563" }}>
-            Мы автоматически распознаём паспортные данные и номера автомобилей и замазываем их.
-          </p>
+          <p style={{ margin: "4px 0 0", color: "#4b5563" }}>Мы распознаём номера автомобилей и замазываем цифры.</p>
         </div>
         <Button onClick={() => navigate("/result")} style={{ background: "rgba(14,165,233,0.12)", boxShadow: "none" }}>
           Посмотреть результат
@@ -113,7 +111,7 @@ export default function Upload() {
             <Button onClick={send} disabled={loading || !file} style={{ paddingInline: 20 }}>
               {loading ? "Обрабатываем..." : "Обработать"}
             </Button>
-            <span style={{ alignSelf: "center", color: "#4b5563" }}>Файл останется только для обработки и не сохраняется.</span>
+            <span style={{ alignSelf: "center", color: "#4b5563" }}>Файлы сохраняются, чтобы их можно было посмотреть в разделе «Результат».</span>
           </div>
         </div>
       </Card>

@@ -18,7 +18,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/upload" element={<ProtectedRoute><Upload /></ProtectedRoute>} />
-            <Route path="/result" element={<ProtectedRoute><Result /></ProtectedRoute>} />
+            <Route path="/result" element={<Result />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
           </Routes>
@@ -28,7 +28,6 @@ export default function App() {
     </BrowserRouter>
   );
 }
-
 
 
 

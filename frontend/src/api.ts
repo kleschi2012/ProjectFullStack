@@ -27,3 +27,9 @@ export async function uploadImage(file: File, token: string) {
     body: form,
   });
 }
+
+export async function fetchProcessed(token?: string) {
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return fetch(`${API_URL}/processed-files`, { headers });
+}
