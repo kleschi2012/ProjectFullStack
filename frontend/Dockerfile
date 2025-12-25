@@ -1,8 +1,9 @@
+# syntax=docker/dockerfile:1.5
 FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 
 COPY . .
 ARG VITE_API_URL=http://localhost:8000
