@@ -33,7 +33,7 @@ export default function Navbar() {
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: 18 }}>DataCleaner</div>
-              <div style={{ fontSize: 12, color: "#4b5563" }}>сокрытие номеров и паспортов</div>
+              <div style={{ fontSize: 12, color: "#4b5563" }}>сокрытие номеров автомобилей</div>
             </div>
           </Link>
 
