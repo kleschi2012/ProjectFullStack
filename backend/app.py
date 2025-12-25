@@ -382,16 +382,19 @@ def blur_regions(image, regions):
         img.paste(crop, (ex1, ey1))
     return img
 
+def _soft_verify_jwt():
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return
+    try:
+        verify_jwt_in_request()
+    except Exception as exc:
+        app.logger.warning("JWT check failed: %s", exc)
+
 @app.route("/process-image", methods=["POST"])
 def process_image():
     # Пытаемся проверить JWT, но не блокируем обработку, чтобы не ронять UX
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        try:
-            verify_jwt_in_request()
-        except Exception as exc:
-            # Логируем, но продолжаем обработку
-            app.logger.warning("JWT check failed: %s", exc)
+    _soft_verify_jwt()
 
     file = request.files.get("file")
     if not file:
@@ -412,8 +415,8 @@ def process_image():
 
 
 @app.route("/processed-files", methods=["GET"])
-@jwt_required(optional=True)
 def list_processed_files():
+    _soft_verify_jwt()
     files = []
     if os.path.isdir(PROCESSED_SAVE_DIR):
         for name in os.listdir(PROCESSED_SAVE_DIR):
@@ -430,8 +433,8 @@ def list_processed_files():
 
 
 @app.route(f"{PROCESSED_URL_PATH.rstrip('/')}/<path:filename>")
-@jwt_required(optional=True)
 def serve_processed(filename):
+    _soft_verify_jwt()
     return send_from_directory(PROCESSED_SAVE_DIR, filename)
 
 @app.route("/health")
