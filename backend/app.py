@@ -1,7 +1,8 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os
+import io
 import cv2
 import numpy as np
 from PIL import Image, ImageFilter
@@ -10,7 +11,8 @@ import easyocr
 import re
 import datetime
 import requests
-from pathlib import Path
+from minio import Minio
+from minio.error import S3Error
 from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity, verify_jwt_in_request
 
 from extensions import db, jwt
@@ -32,9 +34,12 @@ app.config["JWT_HEADER_NAME"] = "Authorization"
 app.config["JWT_HEADER_TYPE"] = "Bearer"
 app.config["PROPAGATE_EXCEPTIONS"] = True
 RESULT_ENDPOINT = os.getenv("RESULT_ENDPOINT", "http://localhost:8080/result")
-BASE_DIR = Path(__file__).resolve().parent
-PROCESSED_SAVE_DIR = os.getenv("PROCESSED_SAVE_DIR", str(BASE_DIR / "processed"))
 PROCESSED_URL_PATH = os.getenv("PROCESSED_URL_PATH", "/processed")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minio")
+MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minio123")
+MINIO_BUCKET = os.getenv("MINIO_BUCKET", "processed")
+MINIO_SECURE = os.getenv("MINIO_SECURE", "false").strip().lower() in ("1", "true", "yes", "y")
 
 # Allow overriding tesseract binary location in container/host
 tesseract_cmd = os.getenv("TESSERACT_CMD")
@@ -44,7 +49,27 @@ if tesseract_cmd:
 db.init_app(app)
 jwt.init_app(app)
 migrate = Migrate(app, db)
-os.makedirs(PROCESSED_SAVE_DIR, exist_ok=True)
+
+_minio_client: Minio | None = None
+
+def _get_minio_client():
+    global _minio_client
+    if _minio_client is not None:
+        return _minio_client
+    client = Minio(
+        MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        secure=MINIO_SECURE,
+    )
+    try:
+        if not client.bucket_exists(MINIO_BUCKET):
+            client.make_bucket(MINIO_BUCKET)
+    except S3Error as exc:
+        app.logger.error("Failed to init MinIO bucket %s: %s", MINIO_BUCKET, exc)
+        raise
+    _minio_client = client
+    return client
 
 # JWT error handlers to вернуть понятные ответы (частая причина 422)
 @jwt.unauthorized_loader
@@ -144,19 +169,16 @@ def _file_relative_path(filename: str):
     return f"{path}/{filename}"
 
 
-def _build_file_info(filename: str):
-    fs_path = os.path.join(PROCESSED_SAVE_DIR, filename)
+def _build_file_info(filename: str, size: int | None = None, mtime: float | None = None):
     info = {
         "name": filename,
         "url": _file_public_url(filename),
         "path": _file_relative_path(filename),
     }
-    try:
-        stat = os.stat(fs_path)
-        info["size"] = stat.st_size
-        info["mtime"] = stat.st_mtime
-    except FileNotFoundError:
-        pass
+    if size is not None:
+        info["size"] = size
+    if mtime is not None:
+        info["mtime"] = mtime
     return info
 
 
@@ -349,29 +371,42 @@ def _expand_box(box, margin, width, height):
 
 def _save_and_forward(image: Image.Image, original_name: str | None):
     """
-    Сохраняем обработанный файл локально и отправляем в внешний endpoint.
+    Сохраняем обработанный файл в MinIO и отправляем в внешний endpoint.
     Ошибки отправки не ломают ответ пользователю.
     """
     ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     safe_name = re.sub(r"[^\w.-]", "_", original_name or "upload")
     filename = f"{ts}_{safe_name}.png"
-    file_path = os.path.join(PROCESSED_SAVE_DIR, filename)
+    payload = io.BytesIO()
+    image.save(payload, "PNG")
+    data = payload.getvalue()
+    size = len(data)
 
-    os.makedirs(PROCESSED_SAVE_DIR, exist_ok=True)
-    image.save(file_path, "PNG")
+    client = _get_minio_client()
+    try:
+        client.put_object(
+            MINIO_BUCKET,
+            filename,
+            io.BytesIO(data),
+            size,
+            content_type="image/png",
+        )
+    except S3Error as exc:
+        app.logger.error("Failed to save processed image to MinIO: %s", exc)
+        raise
+    mtime = datetime.datetime.utcnow().timestamp()
 
     try:
-        with open(file_path, "rb") as fh:
-            resp = requests.post(
-                RESULT_ENDPOINT,
-                files={"file": (filename, fh, "image/png")},
-                timeout=10,
-            )
+        resp = requests.post(
+            RESULT_ENDPOINT,
+            files={"file": (filename, io.BytesIO(data), "image/png")},
+            timeout=10,
+        )
         app.logger.info("Forwarded processed image to %s status=%s", RESULT_ENDPOINT, getattr(resp, "status_code", None))
     except Exception as exc:
         app.logger.error("Failed to forward processed image: %s", exc)
 
-    return _build_file_info(filename)
+    return _build_file_info(filename, size=size, mtime=mtime)
 
 def blur_regions(image, regions):
     img = image.copy()
@@ -418,16 +453,17 @@ def process_image():
 def list_processed_files():
     _soft_verify_jwt()
     files = []
-    if os.path.isdir(PROCESSED_SAVE_DIR):
-        for name in os.listdir(PROCESSED_SAVE_DIR):
+    client = _get_minio_client()
+    try:
+        for obj in client.list_objects(MINIO_BUCKET, recursive=True):
+            name = obj.object_name
             if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".bmp")):
                 continue
-            path = os.path.join(PROCESSED_SAVE_DIR, name)
-            try:
-                os.stat(path)
-            except FileNotFoundError:
-                continue
-            files.append(_build_file_info(name))
+            mtime = obj.last_modified.timestamp() if obj.last_modified else None
+            files.append(_build_file_info(name, size=obj.size, mtime=mtime))
+    except S3Error as exc:
+        app.logger.error("Failed to list MinIO objects: %s", exc)
+        return jsonify({"error": "Не удалось получить список файлов"}), 500
     files.sort(key=lambda f: f.get("mtime") or 0, reverse=True)
     return jsonify({"files": files})
 
@@ -435,7 +471,25 @@ def list_processed_files():
 @app.route(f"{PROCESSED_URL_PATH.rstrip('/')}/<path:filename>")
 def serve_processed(filename):
     _soft_verify_jwt()
-    return send_from_directory(PROCESSED_SAVE_DIR, filename)
+    client = _get_minio_client()
+    try:
+        obj = client.get_object(MINIO_BUCKET, filename)
+    except S3Error as exc:
+        if exc.code == "NoSuchKey":
+            return jsonify({"error": "Файл не найден"}), 404
+        app.logger.error("Failed to fetch file from MinIO: %s", exc)
+        return jsonify({"error": "Не удалось получить файл"}), 500
+
+    def generate():
+        try:
+            for chunk in obj.stream(32 * 1024):
+                yield chunk
+        finally:
+            obj.close()
+            obj.release_conn()
+
+    content_type = obj.headers.get("content-type") or obj.headers.get("Content-Type") or "application/octet-stream"
+    return Response(stream_with_context(generate()), mimetype=content_type)
 
 @app.route("/health")
 def health():

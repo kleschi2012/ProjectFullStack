@@ -11,3 +11,4 @@ numpy>=1.26
 Flask-Migrate>=4.0
 psycopg2-binary>=2.9
 requests>=2.31
+minio>=7.2
